@@ -1,5 +1,6 @@
 import { escapeHtml } from '../utils/sanitizers.js';
 import { styleColors, styleLabels } from '../data/artists.js';
+import { logger } from '../utils/logger.js';
 
 function songCardHtml(song) {
     const color = styleColors[song.style] || '#888';
@@ -78,7 +79,7 @@ export class FavoriteSongsManager {
             const { data, error } = await loadFavoriteSongs();
             if (!error) this.songs = data || [];
         } catch (e) {
-            console.error('FavoriteSongsManager.load:', e);
+            logger.error('FavoriteSongsManager.load:', e);
         }
     }
 
@@ -204,7 +205,7 @@ export class FavoriteSongsManager {
             this.render();
             this.app.showNotification(`"${escapeHtml(name)}" agregada a favoritas`, 'success');
         } catch (e) {
-            console.error('FavoriteSongsManager.save:', e);
+            logger.error('FavoriteSongsManager.save:', e);
             this.app.showNotification('Error al guardar la canción', 'error');
         }
     }
@@ -219,7 +220,7 @@ export class FavoriteSongsManager {
             this.render();
             this.app.showNotification('Canción eliminada', 'info');
         } catch (e) {
-            console.error('FavoriteSongsManager.deleteSong:', e);
+            logger.error('FavoriteSongsManager.deleteSong:', e);
             this.app.showNotification('Error al eliminar la canción', 'error');
         }
     }

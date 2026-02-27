@@ -1,3 +1,5 @@
+import { logger } from '../utils/logger.js';
+
 const BADGES = [
     {
         id: 'practicante',
@@ -49,10 +51,10 @@ const LEVEL_KEYS = ['bronze', 'silver', 'gold'];
 const LEVEL_COLORS = { bronze: '#cd7f32', silver: '#C0C0C0', gold: '#FFD700' };
 
 export class ProgressTracker {
-    constructor(options = {}) {
-        this.enabled = options.enabled !== false;
-        this.storageKey = options.storageKey || 'pianostudy-progress';
-        this.badgesKey = options.badgesKey || 'pianostudy-badges';
+    constructor({ enabled = true, storageKey = 'pianostudy-progress', badgesKey = 'pianostudy-badges' } = {}) {
+        this.enabled = !!enabled;
+        this.storageKey = storageKey;
+        this.badgesKey = badgesKey;
         this.data = this._load();
         this.badges = this._loadBadges();
     }
@@ -70,7 +72,7 @@ export class ProgressTracker {
         try {
             const raw = localStorage.getItem(this.storageKey);
             if (raw) return JSON.parse(raw);
-        } catch (e) { console.error('ProgressTracker load error', e); }
+        } catch (e) { logger.error('ProgressTracker load error', e); }
         return {
             totalStudySeconds: 0,
             totalRecordings: 0,
@@ -85,7 +87,7 @@ export class ProgressTracker {
         try {
             this._trimDailyMinutes();
             localStorage.setItem(this.storageKey, JSON.stringify(this.data));
-        } catch (e) { console.error('ProgressTracker save error', e); }
+        } catch (e) { logger.error('ProgressTracker save error', e); }
     }
 
     _loadBadges() {
@@ -93,7 +95,7 @@ export class ProgressTracker {
         try {
             const raw = localStorage.getItem(this.badgesKey);
             if (raw) return JSON.parse(raw);
-        } catch (e) { console.error('Badge load error', e); }
+        } catch (e) { logger.error('Badge load error', e); }
         return {};
     }
 
@@ -101,7 +103,7 @@ export class ProgressTracker {
         if (!this.enabled) return;
         try {
             localStorage.setItem(this.badgesKey, JSON.stringify(this.badges));
-        } catch (e) { console.error('Badge save error', e); }
+        } catch (e) { logger.error('Badge save error', e); }
     }
 
     _todayStr() {

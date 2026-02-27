@@ -13,7 +13,7 @@
                    style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; 
                    font-src 'self' https://cdnjs.cloudflare.com https://fonts.gstatic.com;
                    img-src 'self' data: https://i.ytimg.com https://upload.wikimedia.org https://wsrv.nl; 
-                   connect-src 'self' https://cdn.jsdelivr.net https://unpkg.com https://mtejpgwjdhzuqrqfdlud.supabase.co wss://mtejpgwjdhzuqrqfdlud.supabase.co https://generativelanguage.googleapis.com; 
+                   connect-src 'self' http://localhost:5173 ws://localhost:5173 http://127.0.0.1:5173 ws://127.0.0.1:5173 https://cdn.jsdelivr.net https://unpkg.com https://mtejpgwjdhzuqrqfdlud.supabase.co wss://mtejpgwjdhzuqrqfdlud.supabase.co; 
                    frame-src https://www.youtube.com https://www.youtube-nocookie.com; 
                    media-src 'self' blob: https://mtejpgwjdhzuqrqfdlud.supabase.co;">
     <title>PianoStudy - Estudio para Pianistas</title>
@@ -710,18 +710,6 @@
                                 <span id="ai-status-dot" class="ai-status-dot ai-status-dot--off" aria-hidden="true"></span>
                                 <span id="ai-status-text" class="ai-status-text">IA Inactiva</span>
                             </div>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="anthropic-api-key">API Key de Google Gemini</label>
-                            <input type="text" id="anthropic-api-key" placeholder="Pega tu Google AI API key aquí (AIza...)" autocomplete="off" spellcheck="false">
-                            <small class="settings-help">Se guarda solo en este dispositivo (localStorage).</small>
-                        </div>
-
-                        <div class="form-actions">
-                            <button class="btn-primary" data-action="ai-key-save">
-                                <i class="fas fa-save"></i> Guardar
-                            </button>
                         </div>
                     </div>
                 </div>

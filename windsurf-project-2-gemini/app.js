@@ -5,6 +5,12 @@ import { AIAnalysisEngine } from './assets/js/modules/AIAnalysisEngine.js';
 import { ProgressTracker } from './assets/js/modules/ProgressTracker.js';
 import { ArtistsManager } from './assets/js/modules/ArtistsManager.js';
 import { FavoriteSongsManager } from './assets/js/modules/FavoriteSongsManager.js';
+import { RecordingController } from './assets/js/controllers/RecordingController.js';
+import { StudyPlayerController } from './assets/js/controllers/StudyPlayerController.js';
+import { AnalysisController } from './assets/js/controllers/AnalysisController.js';
+import { PracticeTimerController } from './assets/js/controllers/PracticeTimerController.js';
+import { getActiveUsername } from './assets/js/utils/session.js';
+import { logger } from './assets/js/utils/logger.js';
 import {
     loadLicksFromDB, insertLick, updateLick, deleteLick, uploadLickAudio,
     loadRecordingsFromDB, uploadRecording, getRecordingPublicUrl, deleteRecording,
@@ -17,16 +23,6 @@ import { db } from './assets/js/modules/supabase-client.js';
 // PianoStudy App - Main JavaScript
 class PianoStudyApp {
     constructor() {
-        this.isRecording = false;
-        this.isPlaying = false;
-        this.mediaRecorder = null;
-        this.audioChunks = [];
-        this.audioContext = null;
-        this.analyser = null;
-        this.microphone = null;
-        this.backingTrack = null;
-        this.currentAudio = null;
-        this.currentPlayingAudio = null;
         this.selectedLicks = new Set();
         this.currentRecordingDuration = null;
 
@@ -46,20 +42,9 @@ class PianoStudyApp {
         this.currentUser = null;
         this.licks = [];
         this.phrases = [];
+
         this.tempRecordings = [];
-        this.recordingStartTime = null;
-        this.recordingTimer = null;
-
         this.objectURLs = new Set();
-        this.currentStream = null;
-
-        // Study Player (lick queue)
-        this.studyQueue = [];
-        this.studyIndex = -1;
-        this.studyLoop = true;
-        this.studyPlaybackRate = 1;
-        this.studyAudio = null;
-        this.studyAudioUrl = null;
 
         // YouTube Study
         this.youtubeManager = new YouTubeManager();
@@ -67,40 +52,15 @@ class PianoStudyApp {
 
         // AI Analysis
         this.audioAnalyzer = new AudioAnalyzer();
-        this.aiEngine = null;
-        this.currentAnalysis = null;
-        this.analysisHistory = [];
-        this.currentAnalysisAudioBlob = null;
-        this.analysisAudioUrl = null;
-        this.analysisSegmentTimer = null;
-        this.analysisChat = [];
 
         // Progress tracking
         this.progressTracker = this.createProgressTracker();
         this._chartResizeObserver = null;
 
-        // Practice timer
-        this.practiceTimerInterval = null;
-        this.practiceTimerRunning = false;
-        this.practiceTimerStartMs = 0;
-        this.practiceTimerElapsedSec = 0;
-        this.practiceTodayTotalSec = 0;
-        this.practiceChartDays = null;
-        this.practiceChartStats = { avg: 0, best: 0 };
-
-        this.practiceMilestonesShown = new Set();
-        this.practiceCelebrationEl = null;
-        this.practiceCelebrationTimer = null;
-        try {
-            this.navTimerCollapsed = localStorage.getItem('pianostudy-timer-collapsed') === '1';
-        } catch {
-            this.navTimerCollapsed = false;
-        }
-        try {
-            this.mobileTimerCollapsed = localStorage.getItem('pianostudy-timer-mobile-collapsed') === '1';
-        } catch {
-            this.mobileTimerCollapsed = false;
-        }
+        this.recording = new RecordingController(this);
+        this.studyPlayer = new StudyPlayerController(this);
+        this.analysis = new AnalysisController(this);
+        this.practiceTimer = new PracticeTimerController(this);
 
         // Artists
         this.artistsManager = new ArtistsManager(this);
@@ -110,7 +70,7 @@ class PianoStudyApp {
     }
 
     createProgressTracker() {
-        const u = this.getActiveUsername();
+        const u = getActiveUsername();
         if (!u) {
             return new ProgressTracker({ enabled: false });
         }
@@ -121,26 +81,8 @@ class PianoStudyApp {
         });
     }
 
-    getActiveUsername() {
-        try {
-            const keys = Object.keys(localStorage);
-            const sbKey = keys.find(k => k.startsWith('sb-') && k.endsWith('-auth-token'));
-            if (!sbKey) return null;
-            const raw = localStorage.getItem(sbKey);
-            if (!raw) return null;
-            const parsed = JSON.parse(raw);
-            const supaSession = parsed?.session ?? parsed;
-            if (!supaSession?.user) return null;
-            if (supaSession.expires_at && Date.now() / 1000 > supaSession.expires_at) return null;
-            const meta = supaSession.user.user_metadata || {};
-            return meta.username || supaSession.user.email?.split('@')[0] || null;
-        } catch {
-            return null;
-        }
-    }
-
     userKey(base) {
-        const u = this.getActiveUsername();
+        const u = getActiveUsername();
         return u ? `${base}_${u}` : base;
     }
 
@@ -159,7 +101,7 @@ class PianoStudyApp {
             if (!raw) return fallback;
             return JSON.parse(raw);
         } catch (e) {
-            console.error('Error leyendo localStorage:', key, e);
+            logger.error('Error leyendo localStorage:', key, e);
             return fallback;
         }
     }
@@ -169,30 +111,21 @@ class PianoStudyApp {
             localStorage.setItem(key, JSON.stringify(value));
             return true;
         } catch (e) {
-            console.error('Error escribiendo localStorage:', key, e);
+            logger.error('Error escribiendo localStorage:', key, e);
             return false;
         }
     }
 
     cleanupObjectURL(url) {
-        if (this.objectURLs.has(url)) {
-            URL.revokeObjectURL(url);
-            this.objectURLs.delete(url);
-        }
+        return this.recording.cleanupObjectURL(url);
     }
 
     createTrackedObjectURL(blob) {
-        const url = URL.createObjectURL(blob);
-        this.objectURLs.add(url);
-        return url;
+        return this.recording.createTrackedObjectURL(blob);
     }
 
     cleanupContainerObjectURLs(container) {
-        if (!container) return;
-        container.querySelectorAll?.('audio[data-object-url]').forEach((el) => {
-            const url = el.getAttribute('data-object-url');
-            if (url) this.cleanupObjectURL(url);
-        });
+        return this.recording.cleanupContainerObjectURLs(container);
     }
 
     async init() {
@@ -215,6 +148,102 @@ class PianoStudyApp {
         this.loadRecordingsFromServer();
         this.artistsManager.init();
         this.favoriteSongsManager.init();
+    }
+
+    async initAudioContext() {
+        return await this.recording.initAudioContext();
+    }
+
+    async refreshAudioDevices() {
+        return await this.recording.refreshAudioDevices();
+    }
+
+    async selectAudioDevice(deviceId) {
+        return await this.recording.selectAudioDevice(deviceId);
+    }
+
+    async toggleRecording() {
+        return await this.recording.toggleRecording();
+    }
+
+    async startRecording() {
+        return await this.recording.startRecording();
+    }
+
+    stopRecording() {
+        return this.recording.stopRecording();
+    }
+
+    startRecordingTimer() {
+        return this.recording.startRecordingTimer();
+    }
+
+    stopRecordingTimer() {
+        return this.recording.stopRecordingTimer();
+    }
+
+    async loadRecordingsFromServer() {
+        return await this.recording.loadRecordingsFromServer();
+    }
+
+    async addToTempRecordings(audioBlob) {
+        return await this.recording.addToTempRecordings(audioBlob);
+    }
+
+    updateTempRecordingsList() {
+        return this.recording.updateTempRecordingsList();
+    }
+
+    playTempRecording(id) {
+        return this.recording.playTempRecording(id);
+    }
+
+    stopTempRecording(id) {
+        return this.recording.stopTempRecording(id);
+    }
+
+    async editTempRecording(id) {
+        return await this.recording.editTempRecording(id);
+    }
+
+    async deleteTempRecording(id) {
+        return await this.recording.deleteTempRecording(id);
+    }
+
+    async deleteAllTempRecordings() {
+        return await this.recording.deleteAllTempRecordings();
+    }
+
+    playRecording() {
+        return this.recording.playRecording();
+    }
+
+    stopPlayback() {
+        return this.recording.stopPlayback();
+    }
+
+    loadBackingTrack(event) {
+        return this.recording.loadBackingTrack(event);
+    }
+
+    playBackingTrack() {
+        return this.recording.playBackingTrack();
+    }
+
+    stopBackingTrack() {
+        return this.recording.stopBackingTrack();
+    }
+
+    startVisualization() {
+        return this.recording.startVisualization();
+    }
+
+    updateLevelMeters(dataArray) {
+        return this.recording.updateLevelMeters(dataArray);
+    }
+
+    showRecordingList() {
+        return this.recording.showRecordingList();
     }
 
     setupEventListeners() {
@@ -352,17 +381,6 @@ class PianoStudyApp {
             const actionBtn = e.target.closest?.('[data-action]');
             if (!actionBtn) return;
             const action = actionBtn.dataset.action;
-
-            if (action === 'ai-key-save') {
-                const key = document.getElementById('anthropic-api-key')?.value?.trim() || '';
-                if (!key) {
-                    this.showNotification('Pega tu API key de Google Gemini (AIza...)', 'error');
-                    return;
-                }
-                localStorage.setItem('pianostudy-ai-api-key', key);
-                location.reload();
-                return;
-            }
 
             if (action === 'analysis-view') {
                 this.viewHistoricalAnalysis(Number(actionBtn.dataset.id));
@@ -617,9 +635,7 @@ class PianoStudyApp {
     }
 
     updateStudyLoopButton(btnEl) {
-        const btn = btnEl || document.querySelector('[data-action="study-toggle-loop"]');
-        if (!btn) return;
-        btn.innerHTML = `<i class="fas fa-redo"></i> Loop: ${this.studyLoop ? 'ON' : 'OFF'}`;
+        return this.studyPlayer.updateStudyLoopButton(btnEl);
     }
 
     loadYoutubeVideo() {
@@ -646,7 +662,7 @@ class PianoStudyApp {
 
             this.showNotification('Video cargado correctamente', 'success');
         } catch (error) {
-            console.error('Error loading YouTube video:', error);
+            logger.error('Error loading YouTube video:', error);
             this.showNotification(error?.message || 'Error al cargar video', 'error');
         }
     }
@@ -671,7 +687,7 @@ class PianoStudyApp {
                 this.showNotification('Inicio marcado', 'success');
             }
         } catch (error) {
-            console.error('Error marking start:', error);
+            logger.error('Error marking start:', error);
             this.showNotification('Error al marcar inicio', 'error');
         }
     }
@@ -693,7 +709,7 @@ class PianoStudyApp {
                 this.showNotification('Final marcado', 'success');
             }
         } catch (error) {
-            console.error('Error marking end:', error);
+            logger.error('Error marking end:', error);
             this.showNotification(error?.message || 'Error al marcar final', 'error');
         }
     }
@@ -711,7 +727,7 @@ class PianoStudyApp {
         try {
             this.youtubeManager.playSegment();
         } catch (error) {
-            console.error('Error playing segment:', error);
+            logger.error('Error playing segment:', error);
             this.showNotification(error?.message || 'Error al reproducir segmento', 'error');
         }
     }
@@ -777,7 +793,7 @@ class PianoStudyApp {
             await this.loadYoutubePhrases(document.getElementById('youtube-phrases-filter')?.value || 'all');
             this.showNotification('¡Frase guardada!', 'success');
         } catch (error) {
-            console.error('Error saving YouTube phrase:', error);
+            logger.error('Error saving YouTube phrase:', error);
             this.showNotification('Error al guardar frase', 'error');
         }
     }
@@ -808,7 +824,7 @@ class PianoStudyApp {
 
             this.renderYoutubePhrases();
         } catch (error) {
-            console.error('Error loading YouTube phrases:', error);
+            logger.error('Error loading YouTube phrases:', error);
             this.showNotification('Error al cargar frases', 'error');
         }
     }
@@ -878,7 +894,7 @@ class PianoStudyApp {
 
             this.showNotification('Reproduciendo frase...', 'success');
         } catch (error) {
-            console.error('Error playing phrase:', error);
+            logger.error('Error playing phrase:', error);
             this.showNotification('Error al reproducir', 'error');
         }
     }
@@ -899,7 +915,7 @@ class PianoStudyApp {
             await this.loadYoutubePhrases(document.getElementById('youtube-phrases-filter')?.value || 'all');
             this.showNotification('Frase eliminada', 'success');
         } catch (error) {
-            console.error('Error deleting phrase:', error);
+            logger.error('Error deleting phrase:', error);
             this.showNotification('Error al eliminar', 'error');
         }
     }
@@ -909,116 +925,27 @@ class PianoStudyApp {
     }
 
     initializeAIEngine() {
-        const apiKey = localStorage.getItem('pianostudy-ai-api-key');
-        this.aiEngine = apiKey ? new AIAnalysisEngine(apiKey) : null;
-        this.updateAIStatusIndicator();
+        return this.analysis.initializeAIEngine();
     }
 
     updateAIStatusIndicator() {
-        const key = localStorage.getItem('pianostudy-ai-api-key');
-        const dot = document.getElementById('ai-status-dot');
-        const text = document.getElementById('ai-status-text');
-
-        if (dot) {
-            dot.classList.toggle('ai-status-dot--on', !!key);
-            dot.classList.toggle('ai-status-dot--off', !key);
-        }
-        if (text) {
-            text.textContent = key ? 'IA Activa' : 'IA Inactiva';
-        }
-
-        const input = document.getElementById('anthropic-api-key');
-        if (input && key && !input.value) {
-            input.value = key;
-        }
+        return this.analysis.updateAIStatusIndicator();
     }
 
     async showAnalysisSection() {
-        this.showSection('ai-analysis');
-        this.loadRecordingsForAnalysis();
+        return await this.analysis.showAnalysisSection();
     }
 
     loadRecordingsForAnalysis() {
-        const select = document.getElementById('analysis-recording-select');
-        if (!select) return;
-
-        select.innerHTML = '<option value="">Selecciona una grabación...</option>';
-
-        if (this.currentRecording instanceof Blob) {
-            const opt = document.createElement('option');
-            opt.value = 'current';
-            opt.textContent = `Grabación actual (${this.formatDuration(this.currentRecordingDuration || 0)})`;
-            select.appendChild(opt);
-        }
-
-        (this.tempRecordings || []).forEach((rec) => {
-            if (!rec || !(rec.blob instanceof Blob)) return;
-            const opt = document.createElement('option');
-            opt.value = String(rec.id);
-            opt.textContent = `${rec.name} (${this.formatDuration(rec.duration || 0)})`;
-            select.appendChild(opt);
-        });
+        return this.analysis.loadRecordingsForAnalysis();
     }
 
     getRecordingBlobForAnalysis(selectionValue) {
-        if (selectionValue === 'current') {
-            return this.currentRecording instanceof Blob ? this.currentRecording : null;
-        }
-        const id = Number(selectionValue);
-        if (!Number.isFinite(id)) return null;
-        const rec = (this.tempRecordings || []).find(r => r.id === id);
-        return rec?.blob instanceof Blob ? rec.blob : null;
+        return this.analysis.getRecordingBlobForAnalysis(selectionValue);
     }
 
     async startAnalysis() {
-        const select = document.getElementById('analysis-recording-select');
-        const selection = String(select?.value || '');
-        if (!selection) return;
-
-        const audioBlob = this.getRecordingBlobForAnalysis(selection);
-        if (!audioBlob) {
-            this.showNotification('Grabación no encontrada', 'error');
-            return;
-        }
-
-        const statusEl = document.getElementById('analysis-status');
-        const resultsEl = document.getElementById('analysis-results');
-        statusEl?.classList.remove('hidden');
-        resultsEl?.classList.add('hidden');
-
-        try {
-            this.updateAnalysisProgress(15);
-            const audioAnalysis = await this.audioAnalyzer.analyzeAudio(audioBlob, { enableMidiTranscription: true });
-            this.updateAnalysisProgress(55);
-
-            const aiEngine = this.aiEngine || new AIAnalysisEngine('');
-            const aiAnalysis = await aiEngine.analyzePerformance(audioAnalysis, {});
-            this.updateAnalysisProgress(80);
-
-            const canvas = document.getElementById('analysis-waveform');
-            if (canvas) {
-                const audioBuffer = await this.getAudioBuffer(audioBlob);
-                this.audioAnalyzer.generateAnnotatedWaveform(audioBuffer, canvas);
-            }
-
-            this.updateAnalysisProgress(100);
-
-            this.currentAnalysis = {
-                recordingId: selection,
-                recordingName: selection === 'current' ? 'Grabación actual' : `Grabación ${selection}`,
-                audioAnalysis,
-                aiAnalysis,
-                timestamp: Date.now()
-            };
-            this.currentAnalysisAudioBlob = audioBlob;
-
-            statusEl?.classList.add('hidden');
-            this.displayAnalysisResults();
-        } catch (error) {
-            console.error('Error during analysis:', error);
-            statusEl?.classList.add('hidden');
-            this.showNotification('Error al analizar la grabación', 'error');
-        }
+        return await this.analysis.startAnalysis();
     }
 
     updateAnalysisProgress(percent) {
@@ -1033,618 +960,103 @@ class PianoStudyApp {
     }
 
     displayAnalysisResults() {
-        if (!this.currentAnalysis) return;
-        const { audioAnalysis, aiAnalysis } = this.currentAnalysis;
-
-        document.getElementById('analysis-results')?.classList.remove('hidden');
-
-        const tempoBpm = Number(audioAnalysis?.tempo?.bpm || audioAnalysis?.tempo || 0);
-        const tempoConfidence = Number(audioAnalysis?.tempo?.confidence || 0);
-        const keyName = audioAnalysis?.key?.key || audioAnalysis?.pitch || '--';
-        const keyScale = audioAnalysis?.key?.scale || '';
-        const keyStrength = Number(audioAnalysis?.key?.strength || 0);
-        const dynamic = Number(audioAnalysis?.loudness?.dynamicComplexity || 0);
-
-        document.getElementById('detected-tempo').textContent = `${tempoBpm || '--'} BPM`;
-        document.getElementById('detected-key').textContent = `${keyName}${keyScale ? ` ${keyScale}` : ''}`;
-        document.getElementById('overall-score').textContent = `${aiAnalysis.overallScore}/10`;
-        document.getElementById('recording-duration').textContent = this.formatDuration(Math.floor(audioAnalysis.duration));
-
-        const bpmValueEl = document.getElementById('metric-bpm-value');
-        const bpmConfBarEl = document.getElementById('metric-bpm-confidence');
-        const bpmConfTextEl = document.getElementById('metric-bpm-confidence-text');
-        if (bpmValueEl) bpmValueEl.textContent = `${tempoBpm || '--'} BPM`;
-        if (bpmConfBarEl) bpmConfBarEl.style.width = `${Math.max(0, Math.min(100, tempoConfidence * 100))}%`;
-        if (bpmConfTextEl) bpmConfTextEl.textContent = `Confianza ${(tempoConfidence * 100).toFixed(0)}%`;
-
-        const keyValueEl = document.getElementById('metric-key-value');
-        const keyStrengthBarEl = document.getElementById('metric-key-strength');
-        const keyStrengthTextEl = document.getElementById('metric-key-strength-text');
-        if (keyValueEl) keyValueEl.textContent = `${keyName}${keyScale ? ` ${keyScale}` : ''}`;
-        if (keyStrengthBarEl) keyStrengthBarEl.style.width = `${Math.max(0, Math.min(100, keyStrength * 100))}%`;
-        if (keyStrengthTextEl) keyStrengthTextEl.textContent = `Fuerza ${(keyStrength * 100).toFixed(0)}%`;
-
-        const dynGaugeEl = document.getElementById('metric-dynamic-gauge');
-        const dynTextEl = document.getElementById('metric-dynamic-text');
-        if (dynGaugeEl) dynGaugeEl.style.width = `${Math.max(0, Math.min(100, dynamic * 100))}%`;
-        if (dynTextEl) dynTextEl.textContent = `Complejidad ${(dynamic || 0).toFixed(2)}`;
-
-        const midiContainer = document.getElementById('midi-notes-container');
-        const midiList = document.getElementById('midi-notes-list');
-        const midiNotes = Array.isArray(audioAnalysis?.midiNotes) ? audioAnalysis.midiNotes : [];
-        if (midiContainer && midiList) {
-            if (midiNotes.length > 0) {
-                midiContainer.classList.remove('hidden');
-                midiList.innerHTML = midiNotes.slice(0, 24).map((n) => {
-                    const pitchMidi = Number(n?.pitchMidi ?? n?.pitch ?? 0);
-                    const start = Number(n?.startTimeSeconds ?? n?.start ?? 0);
-                    const dur = Number(n?.durationSeconds ?? n?.duration ?? 0);
-                    const amp = Number(n?.amplitude ?? 0);
-                    return `<div class="midi-note-item">MIDI ${escapeHtml(String(Math.round(pitchMidi)))} · ${escapeHtml(start.toFixed(2))}s → ${escapeHtml((start + dur).toFixed(2))}s · amp ${escapeHtml(amp.toFixed(2))}</div>`;
-                }).join('');
-            } else {
-                midiContainer.classList.add('hidden');
-                midiList.innerHTML = '';
-            }
-        }
-
-        const musicalEl = document.getElementById('musical-analysis');
-        if (musicalEl) musicalEl.innerHTML = `<p>${escapeHtml(aiAnalysis.musicalAnalysis || '')}</p>`;
-
-        const posEl = document.getElementById('positive-feedback');
-        if (posEl) {
-            const arr = Array.isArray(aiAnalysis.positiveAspects) ? aiAnalysis.positiveAspects : [];
-            posEl.innerHTML = arr.map(aspect => `
-                <div class="feedback-item">
-                    <div class="feedback-icon">✅</div>
-                    <div class="feedback-text">${escapeHtml(aspect)}</div>
-                </div>
-            `).join('');
-        }
-
-        const impEl = document.getElementById('improvement-feedback');
-        if (impEl) {
-            const arr = Array.isArray(aiAnalysis.areasToImprove) ? aiAnalysis.areasToImprove : [];
-            impEl.innerHTML = arr.map(area => `
-                <div class="feedback-item improvement">
-                    <div class="feedback-icon">💡</div>
-                    <div class="feedback-text">${escapeHtml(area)}</div>
-                </div>
-            `).join('');
-        }
-
-        const sugEl = document.getElementById('practice-suggestions');
-        if (sugEl) {
-            const arr = Array.isArray(aiAnalysis.practiceSuggestions) ? aiAnalysis.practiceSuggestions : [];
-            sugEl.innerHTML = arr.map(s => `
-                <div class="suggestion-card">
-                    <div class="suggestion-title">
-                        <i class="fas fa-star"></i>
-                        ${escapeHtml(s.title || '')}
-                    </div>
-                    <div class="suggestion-description">
-                        ${escapeHtml(s.description || '')}
-                    </div>
-                </div>
-            `).join('');
-        }
-
-        // Audio player
-        const audioEl = document.getElementById('analysis-audio');
-        if (audioEl) {
-            if (this.analysisAudioUrl) {
-                this.cleanupObjectURL(this.analysisAudioUrl);
-                this.analysisAudioUrl = null;
-            }
-
-            if (this.currentAnalysisAudioBlob instanceof Blob) {
-                const url = this.createTrackedObjectURL(this.currentAnalysisAudioBlob);
-                this.analysisAudioUrl = url;
-                audioEl.src = url;
-                audioEl.setAttribute('data-object-url', url);
-            } else {
-                audioEl.removeAttribute('src');
-                audioEl.load();
-            }
-        }
-
-        const startEl = document.getElementById('segment-start');
-        const endEl = document.getElementById('segment-end');
-        if (startEl && endEl) {
-            startEl.value = '0';
-            endEl.value = String(Math.max(0, Number(audioAnalysis.duration?.toFixed?.(1) || 0)));
-        }
-
-        // Reset chat
-        this.analysisChat = [];
-        this.renderAnalysisChat();
+        return this.analysis.displayAnalysisResults();
     }
 
     saveAnalysis() {
-        if (!this.currentAnalysis) return;
-
-        this.analysisHistory = Array.isArray(this.analysisHistory) ? this.analysisHistory : [];
-        this.analysisHistory.unshift(this.currentAnalysis);
-        this.safeSetLocalStorage(this.userKey('pianostudy-analysis-history'), this.analysisHistory);
-        this.renderAnalysisHistory();
-        this.persistCurrentAnalysisAudio();
-        this.showNotification('Análisis guardado', 'success');
+        return this.analysis.saveAnalysis();
     }
 
     loadAnalysisHistory() {
-        if (!this.getActiveUsername()) {
-            this.analysisHistory = [];
-            this.renderAnalysisHistory();
-            return;
-        }
-        const stored = this.safeGetLocalStorage(this.userKey('pianostudy-analysis-history'), []);
-        this.analysisHistory = Array.isArray(stored) ? stored : [];
-        this.renderAnalysisHistory();
+        return this.analysis.loadAnalysisHistory();
     }
 
     renderAnalysisHistory() {
-        const container = document.getElementById('analysis-history-list');
-        if (!container) return;
-
-        if (!this.getActiveUsername()) {
-            container.innerHTML = `<div class="auth-required-banner">
-                <p>Inicia sesión para ver tu historial de análisis</p>
-                <button class="auth-header-btn auth-header-btn--primary" onclick="document.getElementById('auth-open-login')?.click()">Ingresar</button>
-            </div>`;
-            return;
-        }
-
-        if (!this.analysisHistory.length) {
-            container.innerHTML = '<p class="no-data">No hay análisis guardados todavía</p>';
-            return;
-        }
-
-        container.innerHTML = this.analysisHistory.map(analysis => {
-            const date = new Date(analysis.timestamp);
-            const score = analysis.aiAnalysis?.overallScore ?? '--';
-            const tempo = Number(analysis.audioAnalysis?.tempo?.bpm || analysis.audioAnalysis?.tempo || 0) || '--';
-            return `
-                <div class="history-item">
-                    <div class="history-header">
-                        <div>
-                            <div class="history-title">${escapeHtml(analysis.recordingName || 'Grabación')}</div>
-                            <div class="history-date">${escapeHtml(date.toLocaleDateString())}</div>
-                        </div>
-                        <div class="history-actions">
-                            <button class="btn-small" data-action="analysis-view" data-id="${escapeHtml(String(analysis.timestamp))}">
-                                <i class="fas fa-eye"></i> Ver
-                            </button>
-                            <button class="btn-small btn-danger" data-action="analysis-delete" data-id="${escapeHtml(String(analysis.timestamp))}">
-                                <i class="fas fa-trash"></i> Borrar
-                            </button>
-                        </div>
-                    </div>
-                    <div class="history-preview">
-                        <span>Puntuación: ${escapeHtml(String(score))}/10</span>
-                        <span>Tempo: ${escapeHtml(String(tempo))} BPM</span>
-                    </div>
-                </div>
-            `;
-        }).join('');
+        return this.analysis.renderAnalysisHistory();
     }
 
     async deleteAnalysisEntry(timestamp) {
-        const ts = Number(timestamp);
-        if (!Number.isFinite(ts)) return;
-
-        const item = (this.analysisHistory || []).find(a => Number(a?.timestamp) === ts);
-        if (!item) return;
-
-        if (!await this.showConfirm('¿Borrar este análisis?')) return;
-
-        try {
-            this.analysisHistory = (this.analysisHistory || []).filter(a => Number(a?.timestamp) !== ts);
-            this.safeSetLocalStorage(this.userKey('pianostudy-analysis-history'), this.analysisHistory);
-
-            await this.deleteAnalysisAudioFromDb(ts);
-
-            if (Number(this.currentAnalysis?.timestamp) === ts) {
-                this.resetAnalysis();
-            }
-
-            this.renderAnalysisHistory();
-            this.showNotification('Análisis borrado', 'success');
-        } catch (e) {
-            console.error('deleteAnalysisEntry error:', e);
-            this.showNotification('No se pudo borrar el análisis', 'error');
-        }
+        return await this.analysis.deleteAnalysisEntry(timestamp);
     }
 
     resetAnalysis() {
-        document.getElementById('analysis-results')?.classList.add('hidden');
-        const select = document.getElementById('analysis-recording-select');
-        if (select) select.value = '';
-        const btn = document.getElementById('start-analysis-btn');
-        if (btn) btn.disabled = true;
-        this.currentAnalysis = null;
-        this.currentAnalysisAudioBlob = null;
-
-        const audioEl = document.getElementById('analysis-audio');
-        if (audioEl) {
-            audioEl.removeAttribute('src');
-            audioEl.load();
-        }
+        return this.analysis.resetAnalysis();
     }
 
     async viewHistoricalAnalysis(timestamp) {
-        const ts = Number(timestamp);
-        if (!Number.isFinite(ts)) return;
-        const item = (this.analysisHistory || []).find(a => Number(a?.timestamp) === ts);
-        if (!item) return;
-
-        this.currentAnalysis = item;
-        this.currentAnalysisAudioBlob = await this.loadAnalysisAudioFromDb(ts);
-        this.showSection('ai-analysis');
-        this.displayAnalysisResults();
+        return await this.analysis.viewHistoricalAnalysis(timestamp);
     }
 
     renderAnalysisChat() {
-        const container = document.getElementById('analysis-chat-messages');
-        if (!container) return;
-
-        if (!this.analysisChat.length) {
-            container.innerHTML = '<div class="chat-message assistant"><div class="chat-role">IA</div><div class="chat-text">Pregúntame sobre tu interpretación (tempo, dinámica, coordinación, etc.).</div></div>';
-            return;
-        }
-
-        container.innerHTML = this.analysisChat.map(m => {
-            const role = m.role === 'user' ? 'Tú' : 'IA';
-            const cls = m.role === 'user' ? 'user' : 'assistant';
-            return `<div class="chat-message ${cls}"><div class="chat-role">${escapeHtml(role)}</div><div class="chat-text">${escapeHtml(m.text)}</div></div>`;
-        }).join('');
-
-        container.scrollTop = container.scrollHeight;
+        return this.analysis.renderAnalysisChat();
     }
 
     async sendAnalysisChat() {
-        if (!this.currentAnalysis) {
-            this.showNotification('Primero analiza una grabación', 'info');
-            return;
-        }
-
-        const input = document.getElementById('analysis-chat-input');
-        const question = String(input?.value || '').trim();
-        if (!question) return;
-
-        this.analysisChat.push({ role: 'user', text: question });
-        if (input) input.value = '';
-        this.renderAnalysisChat();
-
-        const { audioAnalysis, aiAnalysis } = this.currentAnalysis;
-        const engine = this.aiEngine || new AIAnalysisEngine('');
-        const answer = await engine.answerQuestion(audioAnalysis, aiAnalysis, question);
-        this.analysisChat.push({ role: 'assistant', text: String(answer || '') });
-        this.renderAnalysisChat();
+        return await this.analysis.sendAnalysisChat();
     }
 
     playAnalysisSegment() {
-        const audioEl = document.getElementById('analysis-audio');
-        if (!audioEl || !audioEl.src) {
-            this.showNotification('No hay audio cargado', 'info');
-            return;
-        }
-
-        const start = Math.max(0, Number(document.getElementById('segment-start')?.value || 0));
-        const end = Math.max(0, Number(document.getElementById('segment-end')?.value || 0));
-        if (!(end > start)) {
-            this.showNotification('El fin debe ser mayor que el inicio', 'info');
-            return;
-        }
-
-        if (this.analysisSegmentTimer) {
-            clearInterval(this.analysisSegmentTimer);
-            this.analysisSegmentTimer = null;
-        }
-
-        audioEl.currentTime = start;
-        audioEl.play().catch(() => {
-            this.showNotification('No se pudo reproducir el audio', 'error');
-        });
-
-        this.analysisSegmentTimer = setInterval(() => {
-            if (audioEl.currentTime >= end || audioEl.ended) {
-                audioEl.pause();
-                clearInterval(this.analysisSegmentTimer);
-                this.analysisSegmentTimer = null;
-            }
-        }, 100);
+        return this.analysis.playAnalysisSegment();
     }
 
     openAnalysisDb() {
-        return new Promise((resolve, reject) => {
-            const request = indexedDB.open('pianostudy', 1);
-            request.onupgradeneeded = (event) => {
-                const db = event.target.result;
-                if (!db.objectStoreNames.contains('analysis_audio')) {
-                    db.createObjectStore('analysis_audio', { keyPath: 'id' });
-                }
-            };
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-        });
+        return this.analysis.openAnalysisDb();
     }
 
     async persistCurrentAnalysisAudio() {
-        if (!this.currentAnalysis || !(this.currentAnalysisAudioBlob instanceof Blob)) return;
-        const id = Number(this.currentAnalysis.timestamp);
-        if (!Number.isFinite(id)) return;
-
-        try {
-            const db = await this.openAnalysisDb();
-            await new Promise((resolve, reject) => {
-                const tx = db.transaction('analysis_audio', 'readwrite');
-                const store = tx.objectStore('analysis_audio');
-                store.put({ id, blob: this.currentAnalysisAudioBlob });
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-                tx.onabort = () => reject(tx.error);
-            });
-            db.close();
-        } catch (e) {
-            console.error('Error saving analysis audio to IndexedDB:', e);
-        }
+        return await this.analysis.persistCurrentAnalysisAudio();
     }
 
     async loadAnalysisAudioFromDb(timestamp) {
-        const id = Number(timestamp);
-        if (!Number.isFinite(id)) return null;
-
-        try {
-            const db = await this.openAnalysisDb();
-            const record = await new Promise((resolve, reject) => {
-                const tx = db.transaction('analysis_audio', 'readonly');
-                const store = tx.objectStore('analysis_audio');
-                const req = store.get(id);
-                req.onsuccess = () => resolve(req.result);
-                req.onerror = () => reject(req.error);
-            });
-            db.close();
-            return record?.blob instanceof Blob ? record.blob : null;
-        } catch (e) {
-            console.error('Error loading analysis audio from IndexedDB:', e);
-            return null;
-        }
+        return await this.analysis.loadAnalysisAudioFromDb(timestamp);
     }
 
     async deleteAnalysisAudioFromDb(timestamp) {
-        const id = Number(timestamp);
-        if (!Number.isFinite(id)) return;
-
-        try {
-            const db = await this.openAnalysisDb();
-            await new Promise((resolve, reject) => {
-                const tx = db.transaction('analysis_audio', 'readwrite');
-                const store = tx.objectStore('analysis_audio');
-                store.delete(id);
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-                tx.onabort = () => reject(tx.error);
-            });
-            db.close();
-        } catch (e) {
-            console.error('Error deleting analysis audio from IndexedDB:', e);
-        }
+        return await this.analysis.deleteAnalysisAudioFromDb(timestamp);
     }
 
     exportAnalysisPDF() {
-        if (!this.currentAnalysis) return;
-
-        const { recordingName, aiAnalysis, audioAnalysis } = this.currentAnalysis;
-        const tempo = Number(audioAnalysis?.tempo?.bpm || audioAnalysis?.tempo || 0);
-        const key = `${audioAnalysis?.key?.key || audioAnalysis?.pitch || '--'} ${audioAnalysis?.key?.scale || ''}`.trim();
-        const dynamic = Number(audioAnalysis?.loudness?.dynamicComplexity || 0);
-        const content = `ANÁLISIS DE INTERPRETACIÓN MUSICAL\n\nGrabación: ${recordingName}\nDuración: ${audioAnalysis.duration.toFixed(1)}s\nTempo: ${tempo} BPM\nTonalidad: ${key}\nComplejidad dinámica: ${dynamic.toFixed(2)}\nPuntuación: ${aiAnalysis.overallScore}/10\n\nANÁLISIS MUSICAL:\n${aiAnalysis.musicalAnalysis}\n\nASPECTOS POSITIVOS:\n${(aiAnalysis.positiveAspects || []).map((a, i) => `${i + 1}. ${a}`).join('\n')}\n\nÁREAS DE MEJORA:\n${(aiAnalysis.areasToImprove || []).map((a, i) => `${i + 1}. ${a}`).join('\n')}\n\nSUGERENCIAS DE PRÁCTICA:\n${(aiAnalysis.practiceSuggestions || []).map((s, i) => `${i + 1}. ${s.title}\n   ${s.description}`).join('\n\n')}`;
-
-        const blob = new Blob([content], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${sanitizeFileName(`analisis_${recordingName || 'grabacion'}`)}.txt`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        this.showNotification('Análisis exportado como texto (.txt)', 'success');
+        return this.analysis.exportAnalysisPDF();
     }
 
     renderStudyQueue() {
-        const queueEl = document.getElementById('study-queue');
-        const titleEl = document.getElementById('study-now-title');
-        if (!queueEl) return;
-
-        if (this.studyQueue.length === 0) {
-            queueEl.innerHTML = '';
-            if (titleEl) titleEl.textContent = 'Arrastra un lick aquí';
-            return;
-        }
-
-        queueEl.innerHTML = this.studyQueue.map((item, idx) => {
-            const active = idx === this.studyIndex;
-            return `
-                <div class="study-queue-item ${active ? 'active' : ''}">
-                    <div class="study-queue-item-title">
-                        <strong>${escapeHtml(item.name)}</strong>
-                        <small>${escapeHtml(item.style || 'custom')}</small>
-                    </div>
-                    <div class="study-queue-item-actions">
-                        <button class="btn-small" data-action="study-pick" data-index="${idx}">
-                            <i class="fas fa-play"></i>
-                        </button>
-                        <button class="btn-small btn-danger" data-action="study-remove" data-index="${idx}">
-                            <i class="fas fa-times"></i>
-                        </button>
-                    </div>
-                </div>
-            `;
-        }).join('');
-
-        if (titleEl) {
-            const cur = this.studyQueue[this.studyIndex] || this.studyQueue[0];
-            titleEl.textContent = cur ? cur.name : 'Arrastra un lick aquí';
-        }
+        return this.studyPlayer.renderStudyQueue();
     }
 
     studyAddById(lickId) {
-        const lick = this.licks.find(l => l.id === lickId);
-        const hasLocalBlob = lick?.audioBlob instanceof Blob;
-        if (!lick || (!hasLocalBlob && !lick.audioUrl)) {
-            this.showNotification('Ese lick no tiene audio', 'info');
-            return;
-        }
-
-        this.studyQueue.push({
-            id: lick.id,
-            name: lick.name,
-            style: lick.style,
-            startTime: lick.startTime || 0,
-            duration: lick.duration || null,
-            audioBlob: hasLocalBlob ? lick.audioBlob : null,
-            audioUrl: lick.audioUrl || null
-        });
-
-        if (this.studyIndex === -1) this.studyIndex = 0;
-        this.renderStudyQueue();
-        this.showNotification('Agregado a la cola de estudio', 'success');
+        return this.studyPlayer.studyAddById(lickId);
     }
 
     studyRemove(index) {
-        if (!Number.isFinite(index)) return;
-        if (index < 0 || index >= this.studyQueue.length) return;
-
-        this.studyQueue.splice(index, 1);
-        if (this.studyQueue.length === 0) {
-            this.studyIndex = -1;
-            this.studyStop();
-        } else {
-            if (this.studyIndex >= this.studyQueue.length) this.studyIndex = this.studyQueue.length - 1;
-        }
-        this.renderStudyQueue();
+        return this.studyPlayer.studyRemove(index);
     }
 
     studyPick(index) {
-        if (!Number.isFinite(index)) return;
-        if (index < 0 || index >= this.studyQueue.length) return;
-        this.studyIndex = index;
-        this.renderStudyQueue();
-        this.studyPlay();
+        return this.studyPlayer.studyPick(index);
     }
 
     studyClear() {
-        this.studyQueue = [];
-        this.studyIndex = -1;
-        this.studyStop();
-        this.renderStudyQueue();
+        return this.studyPlayer.studyClear();
     }
 
     studyStop() {
-        if (this.studyAudio) {
-            this.studyAudio.pause();
-            this.studyAudio.currentTime = 0;
-            this.studyAudio = null;
-        }
-        if (this.studyAudioUrl) {
-            if (this.studyAudioUrl.startsWith('blob:')) {
-                this.cleanupObjectURL(this.studyAudioUrl);
-            }
-            this.studyAudioUrl = null;
-        }
+        return this.studyPlayer.studyStop();
     }
 
     studyPlay() {
-        if (!this.studyQueue.length) {
-            this.showNotification('Arrastra un lick a la cola primero', 'info');
-            return;
-        }
-        if (this.studyIndex < 0) this.studyIndex = 0;
-
-        const item = this.studyQueue[this.studyIndex];
-        const itemHasBlob = item?.audioBlob instanceof Blob;
-        if (!item || (!itemHasBlob && !item.audioUrl)) {
-            this.showNotification('Este lick no tiene audio disponible', 'info');
-            return;
-        }
-
-        this.studyStop();
-
-        let url;
-        let isObjectUrl = false;
-        if (itemHasBlob) {
-            url = this.createTrackedObjectURL(item.audioBlob);
-            isObjectUrl = true;
-        } else {
-            url = item.audioUrl;
-        }
-        this.studyAudioUrl = url;
-        const audio = new Audio(url);
-        this.studyAudio = audio;
-
-        audio.preload = 'auto';
-        audio.playbackRate = this.studyPlaybackRate;
-        audio.currentTime = Math.max(0, Number(item.startTime) || 0);
-
-        const endAt = item.duration ? Math.max(0.05, Number(item.duration) || 0) : null;
-        let stopTimer = null;
-        if (endAt) {
-            stopTimer = setTimeout(() => {
-                try {
-                    audio.pause();
-                } finally {
-                    if (this.studyLoop) {
-                        this.studyPlay();
-                    } else {
-                        this.studyNext();
-                    }
-                }
-            }, endAt * 1000);
-        }
-
-        audio.onended = () => {
-            if (stopTimer) clearTimeout(stopTimer);
-            if (this.studyLoop) {
-                this.studyPlay();
-            } else {
-                this.studyNext();
-            }
-        };
-
-        audio.onerror = () => {
-            if (stopTimer) clearTimeout(stopTimer);
-            this.showNotification('Error al reproducir en Study Player', 'error');
-            this.studyStop();
-        };
-
-        this.renderStudyQueue();
-        audio.play().catch(() => {
-            if (stopTimer) clearTimeout(stopTimer);
-            this.showNotification('No se pudo iniciar reproducción', 'error');
-            this.studyStop();
-        });
+        return this.studyPlayer.studyPlay();
     }
 
     studyPause() {
-        if (this.studyAudio) {
-            this.studyAudio.pause();
-        }
+        return this.studyPlayer.studyPause();
     }
 
     studyNext() {
-        if (!this.studyQueue.length) return;
-        this.studyIndex = (this.studyIndex + 1) % this.studyQueue.length;
-        this.renderStudyQueue();
-        this.studyPlay();
+        return this.studyPlayer.studyNext();
     }
 
     studyPrev() {
-        if (!this.studyQueue.length) return;
-        this.studyIndex = (this.studyIndex - 1 + this.studyQueue.length) % this.studyQueue.length;
-        this.renderStudyQueue();
-        this.studyPlay();
+        return this.studyPlayer.studyPrev();
     }
 
     showSection(sectionName) {
@@ -1674,627 +1086,71 @@ class PianoStudyApp {
     }
 
     initPracticeTimerWidget() {
-        const startBtn = document.getElementById('practice-timer-start');
-        const stopBtn = document.getElementById('practice-timer-stop');
-        const mobileStartBtn = document.getElementById('mobile-timer-start');
-        const mobileStopBtn = document.getElementById('mobile-timer-stop');
-        const headerBtn = document.getElementById('nav-timer-header');
-        const mobileToggleBtn = document.getElementById('mobile-timer-toggle');
-
-        if (startBtn) startBtn.addEventListener('click', () => this.practiceTimerStart());
-        if (stopBtn) stopBtn.addEventListener('click', () => this.practiceTimerStop());
-        if (mobileStartBtn) mobileStartBtn.addEventListener('click', () => this.practiceTimerStart());
-        if (mobileStopBtn) mobileStopBtn.addEventListener('click', () => this.practiceTimerStop());
-        if (headerBtn) headerBtn.addEventListener('click', () => this.toggleNavTimerCollapsed());
-        if (mobileToggleBtn) mobileToggleBtn.addEventListener('click', () => this.toggleMobileTimerCollapsed());
-
-        this.updatePracticeTimerUI();
+        return this.practiceTimer.initPracticeTimerWidget();
     }
 
     toggleMobileTimerCollapsed() {
-        this.mobileTimerCollapsed = !this.mobileTimerCollapsed;
-        try {
-            localStorage.setItem('pianostudy-timer-mobile-collapsed', this.mobileTimerCollapsed ? '1' : '0');
-        } catch { /* ignore */ }
-        this.updatePracticeTimerUI();
+        return this.practiceTimer.toggleMobileTimerCollapsed();
     }
 
     toggleNavTimerCollapsed() {
-        this.navTimerCollapsed = !this.navTimerCollapsed;
-        try {
-            localStorage.setItem('pianostudy-timer-collapsed', this.navTimerCollapsed ? '1' : '0');
-        } catch { /* ignore */ }
-        this.updatePracticeTimerUI();
+        return this.practiceTimer.toggleNavTimerCollapsed();
     }
 
     showPracticeCelebration(message) {
-        if (!message) return;
-
-        if (!this.practiceCelebrationEl) {
-            const el = document.createElement('div');
-            el.className = 'practice-celebration';
-            el.setAttribute('role', 'status');
-            el.setAttribute('aria-live', 'polite');
-            document.body.appendChild(el);
-            this.practiceCelebrationEl = el;
-        }
-
-        const el = this.practiceCelebrationEl;
-        el.textContent = message;
-        el.classList.remove('is-hiding');
-        el.classList.add('is-showing');
-
-        if (this.practiceCelebrationTimer) clearTimeout(this.practiceCelebrationTimer);
-        this.practiceCelebrationTimer = setTimeout(() => {
-            el.classList.remove('is-showing');
-            el.classList.add('is-hiding');
-        }, 3000);
+        return this.practiceTimer.showPracticeCelebration(message);
     }
 
     checkPracticeMilestones(totalSeconds) {
-        const sec = Math.max(0, Math.floor(Number(totalSeconds) || 0));
-        const milestones = [
-            { s: 0, msg: '✅ Sesión iniciada. ¡Vamos!' },
-            { s: 10 * 60, msg: '🎹 ¡10 minutos! Buen comienzo, sigue así.' },
-            { s: 20 * 60, msg: '🔥 ¡20 minutos! Estás en zona de concentración.' },
-            { s: 30 * 60, msg: '⭐ ¡30 minutos! Media hora de práctica pura.' },
-            { s: 60 * 60, msg: '🏆 ¡1 HORA! Eso es dedicación de verdad. ¡Excelente sesión!' },
-            { s: 2 * 60 * 60, msg: '🎵 ¡2 HORAS! Nivel profesional. Recuerda descansar también.' }
-        ];
-
-        for (const m of milestones) {
-            if (m.s === 0) continue;
-            if (sec === m.s && !this.practiceMilestonesShown.has(m.s)) {
-                this.practiceMilestonesShown.add(m.s);
-                this.showPracticeCelebration(m.msg);
-            }
-        }
+        return this.practiceTimer.checkPracticeMilestones(totalSeconds);
     }
 
     practiceTimerStart() {
-        if (!this.getActiveUsername()) {
-            this.showNotification('Inicia sesión para registrar sesiones', 'info');
-            return;
-        }
-
-        if (this.practiceTimerRunning) {
-            this.practiceTimerPause();
-            return;
-        }
-
-        const isResume = this.practiceTimerElapsedSec > 0;
-        if (!isResume) {
-            this.practiceMilestonesShown = new Set();
-            this.showPracticeCelebration('⏱️ Sesión iniciada. ¡A practicar!');
-        }
-
-        this.practiceTimerRunning = true;
-        this.practiceTimerStartMs = Date.now();
-
-        if (this.practiceTimerInterval) clearInterval(this.practiceTimerInterval);
-        this.practiceTimerInterval = setInterval(() => {
-            this.updatePracticeTimerUI();
-        }, 250);
-
-        this.updatePracticeTimerUI();
+        return this.practiceTimer.practiceTimerStart();
     }
 
     practiceTimerPause() {
-        if (!this.practiceTimerRunning) return;
-        const delta = Math.max(0, Math.floor((Date.now() - this.practiceTimerStartMs) / 1000));
-        this.practiceTimerElapsedSec += delta;
-        this.practiceTimerStartMs = 0;
-        this.practiceTimerRunning = false;
-
-        if (this.practiceTimerInterval) {
-            clearInterval(this.practiceTimerInterval);
-            this.practiceTimerInterval = null;
-        }
-        this.updatePracticeTimerUI();
+        return this.practiceTimer.practiceTimerPause();
     }
 
     async practiceTimerStop() {
-        if (!this.practiceTimerRunning && this.practiceTimerElapsedSec <= 0) return;
-        if (!this.getActiveUsername()) {
-            this.practiceTimerRunning = false;
-            this.practiceTimerElapsedSec = 0;
-            this.practiceTimerStartMs = 0;
-            this.practiceMilestonesShown = new Set();
-            this.updatePracticeTimerUI();
-            return;
-        }
-
-        if (!await this.showConfirm('¿Terminar sesión y guardar el tiempo?')) return;
-
-        const durationSec = this.getPracticeTimerCurrentSeconds();
-        this.practiceTimerRunning = false;
-        this.practiceTimerElapsedSec = 0;
-        this.practiceTimerStartMs = 0;
-
-        if (this.practiceTimerInterval) {
-            clearInterval(this.practiceTimerInterval);
-            this.practiceTimerInterval = null;
-        }
-
-        const sessionStr = this.formatHMS(durationSec);
-        await this.savePracticeSession(durationSec);
-        this.showPracticeCelebration(`✅ Sesión terminada. ¡Buen trabajo hoy! (${sessionStr})`);
-        this.practiceMilestonesShown = new Set();
-        this.updatePracticeTimerUI();
+        return await this.practiceTimer.practiceTimerStop();
     }
 
     getPracticeTimerCurrentSeconds() {
-        const runningDelta = this.practiceTimerRunning
-            ? Math.max(0, Math.floor((Date.now() - this.practiceTimerStartMs) / 1000))
-            : 0;
-        return Math.max(0, this.practiceTimerElapsedSec + runningDelta);
+        return this.practiceTimer.getPracticeTimerCurrentSeconds();
     }
 
     formatHMS(totalSeconds) {
-        const s = Math.max(0, Math.floor(Number(totalSeconds) || 0));
-        const hh = Math.floor(s / 3600);
-        const mm = Math.floor((s % 3600) / 60);
-        const ss = s % 60;
-        return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+        return this.practiceTimer.formatHMS(totalSeconds);
     }
 
     updatePracticeTimerUI() {
-        const navTimer = document.getElementById('nav-timer');
-        const mobileBar = document.getElementById('mobile-timer-bar');
-
-        const timeEl = document.getElementById('practice-timer-time');
-        const todayEl = document.getElementById('practice-timer-today');
-        const mobileTimeEl = document.getElementById('mobile-timer-time');
-
-        const startBtn = document.getElementById('practice-timer-start');
-        const stopBtn = document.getElementById('practice-timer-stop');
-        const mobileStartBtn = document.getElementById('mobile-timer-start');
-        const mobileStopBtn = document.getElementById('mobile-timer-stop');
-
-        const sec = this.getPracticeTimerCurrentSeconds();
-        const timeStr = this.formatHMS(sec);
-        const todayStr = this.formatHMS(this.practiceTodayTotalSec);
-
-        if (timeEl) timeEl.textContent = timeStr;
-        if (todayEl) todayEl.textContent = todayStr;
-        if (mobileTimeEl) mobileTimeEl.textContent = timeStr;
-
-        const mobileTimeStripEl = document.getElementById('mobile-timer-time-strip');
-        if (mobileTimeStripEl) mobileTimeStripEl.textContent = timeStr;
-
-        if (navTimer) navTimer.classList.toggle('is-running', this.practiceTimerRunning);
-        if (navTimer) navTimer.classList.toggle('is-collapsed', !!this.navTimerCollapsed);
-        if (mobileBar) mobileBar.classList.toggle('is-running', this.practiceTimerRunning);
-        if (mobileBar) mobileBar.classList.toggle('is-collapsed', !!this.mobileTimerCollapsed);
-
-        if (this.practiceTimerRunning) {
-            this.checkPracticeMilestones(sec);
-        }
-
-        const canUse = !!this.getActiveUsername();
-        const canStart = canUse && !this.practiceTimerRunning;
-        const canStop = canUse && (this.practiceTimerRunning || this.practiceTimerElapsedSec > 0);
-
-        if (startBtn) startBtn.disabled = !canStart;
-        if (stopBtn) stopBtn.disabled = !canStop;
-        if (mobileStartBtn) mobileStartBtn.disabled = !canStart;
-        if (mobileStopBtn) mobileStopBtn.disabled = !canStop;
-
-        if (startBtn) startBtn.textContent = this.practiceTimerRunning ? '⏸' : '▶';
-        if (mobileStartBtn) mobileStartBtn.textContent = this.practiceTimerRunning ? '⏸' : '▶';
+        return this.practiceTimer.updatePracticeTimerUI();
     }
 
     getTodayDateStr() {
-        const d = new Date();
-        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        return this.practiceTimer.getTodayDateStr();
     }
 
     getPendingPracticeKey() {
-        return this.userKey('pianostudy-pending-practice-session');
+        return this.practiceTimer.getPendingPracticeKey();
     }
 
     savePendingPracticeSession() {
-        if (!this.getActiveUsername()) return;
-        if (!this.practiceTimerRunning) return;
-
-        const durationSec = this.getPracticeTimerCurrentSeconds();
-        if (durationSec <= 0) return;
-
-        const payload = {
-            duration_seconds: durationSec,
-            date: this.getTodayDateStr(),
-            created_at_ms: Date.now()
-        };
-
-        try {
-            localStorage.setItem(this.getPendingPracticeKey(), JSON.stringify(payload));
-        } catch {
-            // ignore
-        }
+        return this.practiceTimer.savePendingPracticeSession();
     }
 
     async flushPendingPracticeSession() {
-        if (!this.getActiveUsername()) return;
-        const key = this.getPendingPracticeKey();
-        let payload = null;
-        try {
-            const raw = localStorage.getItem(key);
-            if (raw) payload = JSON.parse(raw);
-        } catch {
-            payload = null;
-        }
-        if (!payload) return;
-
-        const duration = Math.max(0, Math.floor(Number(payload.duration_seconds) || 0));
-        const date = typeof payload.date === 'string' ? payload.date : this.getTodayDateStr();
-        if (duration <= 0) {
-            localStorage.removeItem(key);
-            return;
-        }
-
-        const { error } = await insertPracticeSession({ duration_seconds: duration, date });
-        if (!error) {
-            localStorage.removeItem(key);
-            await this.refreshPracticeTotals();
-            if (document.getElementById('progress')?.classList.contains('active')) {
-                this.renderProgressSection();
-            }
-        }
+        return await this.practiceTimer.flushPendingPracticeSession();
     }
 
     async savePracticeSession(durationSec) {
-        const sec = Math.max(0, Math.floor(Number(durationSec) || 0));
-        if (sec <= 0) return;
-
-        const { error } = await insertPracticeSession({
-            duration_seconds: sec,
-            date: this.getTodayDateStr()
-        });
-
-        if (error) {
-            console.error('insertPracticeSession error:', error);
-            this.showNotification('No se pudo guardar la sesión', 'error');
-            return;
-        }
-
-        this.progressTracker.addStudyTime(sec);
-        this.progressTracker.checkAndUpdateStreak();
-        this.checkBadgeUpgrades();
-
-        await this.refreshPracticeTotals();
-        if (document.getElementById('progress')?.classList.contains('active')) {
-            this.renderProgressSection();
-        }
-        this.showNotification('Sesión guardada', 'success');
+        return await this.practiceTimer.savePracticeSession(durationSec);
     }
 
     async refreshPracticeTotals() {
-        if (!this.getActiveUsername()) {
-            this.practiceTodayTotalSec = 0;
-            this.updatePracticeTimerUI();
-            return;
-        }
-
-        const today = this.getTodayDateStr();
-        const { data, error } = await loadPracticeSessionsRange({ fromDate: today, toDate: today });
-        if (error) {
-            console.error('loadPracticeSessionsRange error:', error);
-            return;
-        }
-        const total = (data || []).reduce((acc, row) => acc + (Number(row?.duration_seconds) || 0), 0);
-        this.practiceTodayTotalSec = Math.max(0, Math.floor(total));
-        this.updatePracticeTimerUI();
-    }
-
-    async initAudioContext() {
-        try {
-            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            this.analyser = this.audioContext.createAnalyser();
-            this.analyser.fftSize = 256;
-            
-            await this.refreshAudioDevices();
-            this.startVisualization();
-        } catch (error) {
-            console.error('Error initializing audio context:', error);
-        }
-    }
-
-    async refreshAudioDevices() {
-        try {
-            // Primero solicitar permiso para acceder a los dispositivos
-            await navigator.mediaDevices.getUserMedia({ audio: true })
-                .then(stream => {
-                    stream.getTracks().forEach(track => track.stop());
-                });
-            
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            const audioInputs = devices.filter(device => device.kind === 'audioinput');
-            
-            const select = document.getElementById('audio-device');
-            select.innerHTML = '<option value="">Usar dispositivo por defecto</option>';
-            
-            audioInputs.forEach((device, index) => {
-                const option = document.createElement('option');
-                option.value = device.deviceId;
-                option.text = device.label || `Micrófono ${index + 1}`;
-                select.appendChild(option);
-            });
-        } catch (error) {
-            console.error('Error refreshing audio devices:', error);
-            // Si hay error, al menos mostrar opción por defecto
-            const select = document.getElementById('audio-device');
-            select.innerHTML = '<option value="">Usar dispositivo por defecto</option>';
-        }
-    }
-
-    async selectAudioDevice(deviceId) {
-        if (!deviceId) return;
-
-        if (this.currentStream) {
-            this.currentStream.getTracks().forEach(track => track.stop());
-            this.currentStream = null;
-        }
-        
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    deviceId: deviceId,
-                    echoCancellation: false,
-                    noiseSuppression: false,
-                    autoGainControl: false
-                }
-            });
-            
-            if (this.microphone) {
-                this.microphone.disconnect();
-            }
-
-            this.currentStream = stream;
-            
-            this.microphone = this.audioContext.createMediaStreamSource(stream);
-            this.microphone.connect(this.analyser);
-        } catch (error) {
-            console.error('Error selecting audio device:', error);
-        }
-    }
-
-    async toggleRecording() {
-        if (this.isPlaying) {
-            this.showNotification('Detén la reproducción antes de grabar', 'info');
-            return;
-        }
-        
-        if (this.isRecording) {
-            this.stopRecording();
-        } else {
-            await this.startRecording();
-        }
-    }
-
-    async startRecording() {
-        try {
-            const deviceId = document.getElementById('audio-device').value;
-            
-            // Si no hay dispositivo seleccionado, intentar usar el dispositivo por defecto
-            let audioConstraints = {
-                echoCancellation: false,
-                noiseSuppression: false,
-                autoGainControl: false
-            };
-            
-            // Si hay un dispositivo específico seleccionado, usarlo
-            if (deviceId) {
-                audioConstraints.deviceId = { exact: deviceId };
-            }
-
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: audioConstraints
-            });
-
-            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-                ? 'audio/webm;codecs=opus'
-                : 'audio/webm';
-            this.mediaRecorder = new MediaRecorder(stream, { mimeType });
-            this.audioChunks = [];
-            this.recordingStartTime = Date.now();
-
-            this.mediaRecorder.ondataavailable = (event) => {
-                this.audioChunks.push(event.data);
-            };
-
-            this.mediaRecorder.onstop = () => {
-                const audioBlob = new Blob(this.audioChunks, { type: this.mediaRecorder.mimeType || 'audio/webm' });
-                this.currentRecording = audioBlob;
-                document.getElementById('play-btn').disabled = false;
-                document.getElementById('cut-phrases-btn').disabled = false;
-                const analyzeBtn = document.getElementById('analyze-recording-btn');
-                if (analyzeBtn) analyzeBtn.disabled = false;
-                
-                // Agregar a la lista de grabaciones temporales
-                this.addToTempRecordings(audioBlob);
-                
-                // Mostrar lista de grabaciones recientes
-                this.showRecordingList();
-                
-                // Detener el contador de tiempo
-                this.stopRecordingTimer();
-            };
-
-            this.mediaRecorder.start();
-            this.isRecording = true;
-            
-            // Mostrar indicador de grabación
-            document.getElementById('recording-indicator').classList.remove('hidden');
-            
-            // Iniciar contador de tiempo
-            this.startRecordingTimer();
-            
-            const recordBtn = document.getElementById('record-btn');
-            recordBtn.classList.add('recording');
-            recordBtn.innerHTML = '<i class="fas fa-stop"></i> Detener';
-            
-            document.getElementById('stop-btn').disabled = false;
-        } catch (error) {
-            console.error('Error starting recording:', error);
-            this.showNotification('Error al iniciar grabación. Verifica los permisos del micrófono.', 'error');
-        }
-    }
-
-    stopRecording() {
-        // Track study time and recordings
-        const durationSec = this.recordingStartTime
-            ? Math.max(0, Math.floor((Date.now() - this.recordingStartTime) / 1000))
-            : 0;
-
-        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-            this.mediaRecorder.stop();
-            this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
-        }
-        
-        this.isRecording = false;
-        
-        // Ocultar indicador de grabación
-        document.getElementById('recording-indicator').classList.add('hidden');
-        
-        const recordBtn = document.getElementById('record-btn');
-        recordBtn.classList.remove('recording');
-        recordBtn.innerHTML = '<i class="fas fa-circle"></i> Grabar';
-
-        // Progress tracking
-        if (durationSec > 0) {
-            this.progressTracker.addStudyTime(durationSec);
-            this.progressTracker.incrementRecordings();
-            this.progressTracker.checkAndUpdateStreak();
-            this.checkBadgeUpgrades();
-        }
-    }
-
-    startRecordingTimer() {
-        this.recordingTimer = setInterval(() => {
-            const elapsed = Date.now() - this.recordingStartTime;
-            const seconds = Math.floor(elapsed / 1000);
-            const minutes = Math.floor(seconds / 60);
-            const displaySeconds = seconds % 60;
-            
-            const timeString = `${minutes.toString().padStart(2, '0')}:${displaySeconds.toString().padStart(2, '0')}`;
-            document.getElementById('recording-time').textContent = timeString;
-        }, 100);
-    }
-
-    stopRecordingTimer() {
-        if (this.recordingTimer) {
-            clearInterval(this.recordingTimer);
-            this.recordingTimer = null;
-        }
-    }
-
-    async loadRecordingsFromServer() {
-        if (!this.getActiveUsername()) return;
-        const { data, error } = await loadRecordingsFromDB();
-        if (error) {
-            console.error('loadRecordingsFromDB error:', error);
-            return;
-        }
-        const localBlobs = {};
-        this.tempRecordings.forEach(r => { if (r.blob) localBlobs[r.id] = r.blob; });
-        this.tempRecordings = (data || []).map(r => ({
-            id: r.id,
-            name: r.name,
-            blob: localBlobs[r.id] || null,
-            duration: r.duration,
-            filePath: r.file_path,
-            uploading: false
-        }));
-        this.updateTempRecordingsList();
-    }
-
-    async addToTempRecordings(audioBlob) {
-        if (!this.getActiveUsername()) {
-            this.updateTempRecordingsList();
-            return;
-        }
-        const duration = Math.floor((Date.now() - this.recordingStartTime) / 1000);
-        const name = `Grabación ${new Date().toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}`;
-
-        // Keep a local blob reference for immediate playback
-        const localRec = {
-            id: `local-${Date.now()}`,
-            name,
-            blob: audioBlob,
-            duration,
-            filePath: null,
-            uploading: true
-        };
-        this.tempRecordings.unshift(localRec);
-        this.updateTempRecordingsList();
-
-        const { data, error } = await uploadRecording(audioBlob, name, duration);
-        if (error) {
-            console.error('uploadRecording error:', error);
-            localRec.uploading = false;
-            localRec.uploadError = true;
-            this.updateTempRecordingsList();
-            this.showNotification('Error al subir grabación. Se guardó localmente.', 'error');
-            return;
-        }
-        // Replace local entry with server record
-        const idx = this.tempRecordings.indexOf(localRec);
-        if (idx !== -1) {
-            this.tempRecordings[idx] = {
-                id: data.id,
-                name: data.name,
-                blob: audioBlob,
-                duration: data.duration,
-                filePath: data.file_path,
-                uploading: false
-            };
-        }
-        this.updateTempRecordingsList();
-        this.showNotification('Grabación guardada', 'success');
-    }
-
-    updateTempRecordingsList() {
-        const container = document.getElementById('temp-recordings');
-        const deleteAllBtn = document.getElementById('temp-delete-all-btn');
-
-        if (!this.getActiveUsername()) {
-            container.innerHTML = `<div class="auth-required-banner">
-                <p>Inicia sesión para guardar tu progreso</p>
-                <button class="auth-header-btn auth-header-btn--primary" onclick="document.getElementById('auth-open-login')?.click()">Ingresar</button>
-            </div>`;
-            if (deleteAllBtn) deleteAllBtn.style.display = 'none';
-            return;
-        }
-
-        if (deleteAllBtn) deleteAllBtn.style.display = this.tempRecordings.length > 0 ? '' : 'none';
-
-        if (this.tempRecordings.length === 0) {
-            container.innerHTML = '<p class="no-recordings">No hay grabaciones aún</p>';
-            return;
-        }
-        
-        container.innerHTML = this.tempRecordings.map(recording => `
-            <div class="recording-item${recording.uploading ? ' uploading' : ''}">
-                <div class="recording-info">
-                    <div class="recording-name">${escapeHtml(recording.name)}${recording.uploading ? ' <span class="upload-badge"><i class="fas fa-cloud-upload-alt"></i></span>' : ''}</div>
-                    <div class="recording-duration">${this.formatDuration(recording.duration)}</div>
-                </div>
-                <div class="recording-actions">
-                    <button class="btn-small" data-action="temp-play" data-id="${recording.id}" ${!recording.blob && !recording.filePath ? 'disabled' : ''}>
-                        <i class="fas fa-play"></i>
-                    </button>
-                    <button class="btn-small" data-action="temp-stop" data-id="${recording.id}">
-                        <i class="fas fa-stop"></i>
-                    </button>
-                    <button class="btn-small" data-action="temp-edit" data-id="${recording.id}">
-                        <i class="fas fa-cut"></i>
-                    </button>
-                    <button class="btn-small btn-danger" data-action="temp-delete" data-id="${recording.id}" ${recording.uploading ? 'disabled' : ''}>
-                        <i class="fas fa-trash"></i>
-                    </button>
-                </div>
-            </div>
-        `).join('');
+        return await this.practiceTimer.refreshPracticeTotals();
     }
 
     formatDuration(seconds) {
@@ -2307,41 +1163,9 @@ class PianoStudyApp {
         return `${minutes}:${whole.toString().padStart(2, '0')}.${hundredths.toString().padStart(2, '0')}`;
     }
 
-    playTempRecording(id) {
-        const recording = this.tempRecordings.find(r => r.id === id);
-        if (!recording) return;
-
-        let url;
-        let isObjectUrl = false;
-        if (recording.blob instanceof Blob) {
-            url = this.createTrackedObjectURL(recording.blob);
-            isObjectUrl = true;
-        } else if (recording.filePath) {
-            url = getRecordingPublicUrl(recording.filePath);
-        }
-        if (!url) return;
-
-        const audio = new Audio(url);
-        audio.play();
-        audio.onended = () => {
-            if (isObjectUrl) this.cleanupObjectURL(url);
-            recording.currentAudio = null;
-        };
-        recording.currentAudio = audio;
-    }
-
-    stopTempRecording(id) {
-        const recording = this.tempRecordings.find(r => r.id === id);
-        if (recording && recording.currentAudio) {
-            recording.currentAudio.pause();
-            recording.currentAudio.currentTime = 0;
-            recording.currentAudio = null;
-        }
-    }
-
     likeArtist(artistName, event) {
         if (!artistName || typeof artistName !== 'string') {
-            console.error('Nombre de artista inválido');
+            logger.error('Nombre de artista inválido');
             return;
         }
 
@@ -2377,7 +1201,7 @@ class PianoStudyApp {
                 this.showNotification(`Quitaste like a ${artistName}`, 'info');
             }
         } catch (error) {
-            console.error('Error al procesar likes:', error);
+            logger.error('Error al procesar likes:', error);
             this.showNotification('Error al guardar preferencia', 'error');
         }
     }
@@ -2580,7 +1404,7 @@ class PianoStudyApp {
             this.showNotification('Pieza eliminada de favoritos', 'info');
             this.updateFavoritePiecesList();
         } catch (e) {
-            console.error('Error eliminando favorito:', e);
+            logger.error('Error eliminando favorito:', e);
             this.showNotification('Error al eliminar favorito', 'error');
         }
     }
@@ -2679,7 +1503,12 @@ class PianoStudyApp {
         });
     }
 
-    showNotification(message, type = 'info') {
+    showNotification(message, type = 'success') {
+        // Remove existing notifications
+        const existing = document.querySelector('.notification');
+        if (existing) {
+            existing.remove();
+        }
         // Crear notificación
         const notification = document.createElement('div');
         notification.className = `notification notification-${type}`;
@@ -2708,224 +1537,6 @@ class PianoStudyApp {
                 document.body.removeChild(notification);
             }, 300);
         }, 3000);
-    }
-
-    async editTempRecording(id) {
-        const recording = this.tempRecordings.find(r => r.id === id);
-        if (!recording) return;
-
-        if (!recording.blob && recording.filePath) {
-            this.showNotification('Descargando audio…', 'info');
-            try {
-                const url = getRecordingPublicUrl(recording.filePath);
-                if (!url) throw new Error('No URL');
-                const resp = await fetch(url);
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                recording.blob = await resp.blob();
-            } catch (e) {
-                console.error('editTempRecording download error:', e);
-                this.showNotification('No se pudo descargar el audio para editar', 'error');
-                return;
-            }
-        }
-
-        if (!recording.blob) {
-            this.showNotification('El audio no está disponible para editar', 'info');
-            return;
-        }
-
-        this.currentRecording = recording.blob;
-        this.openPhraseEditor();
-    }
-
-    async deleteTempRecording(id) {
-        const recording = this.tempRecordings.find(r => r.id === id);
-        if (!recording) return;
-
-        // If it's a local-only (upload failed) record, just remove from memory
-        if (String(id).startsWith('local-') || !recording.filePath) {
-            this.tempRecordings = this.tempRecordings.filter(r => r.id !== id);
-            this.updateTempRecordingsList();
-            return;
-        }
-
-        const { error } = await deleteRecording(id, recording.filePath);
-        if (error) {
-            this.showNotification(ERR_MSG, 'error');
-            return;
-        }
-        this.tempRecordings = this.tempRecordings.filter(r => r.id !== id);
-        this.updateTempRecordingsList();
-        this.showNotification('Grabación eliminada', 'info');
-    }
-
-    async deleteAllTempRecordings() {
-        if (this.tempRecordings.length === 0) return;
-        if (!await this.showConfirm(`¿Borrar todas las ${this.tempRecordings.length} grabaciones temporales?`)) return;
-
-        const toDelete = [...this.tempRecordings];
-        for (const rec of toDelete) {
-            if (!String(rec.id).startsWith('local-') && rec.filePath) {
-                await deleteRecording(rec.id, rec.filePath);
-            }
-        }
-        this.tempRecordings = [];
-        this.updateTempRecordingsList();
-        this.showNotification('Todas las grabaciones eliminadas', 'info');
-    }
-
-    playRecording() {
-        if (!this.currentRecording) return;
-        
-        // Detener reproducción anterior si existe
-        if (this.currentAudio) {
-            this.currentAudio.pause();
-            this.currentAudio.currentTime = 0;
-        }
-        
-        // Deshabilitar botón de grabar mientras se reproduce
-        document.getElementById('record-btn').disabled = true;
-        this.isPlaying = true;
-        
-        const url = this.createTrackedObjectURL(this.currentRecording);
-        this.currentAudio = new Audio(url);
-        this.currentAudio.play();
-
-        this.currentAudio.onended = () => {
-            this.cleanupObjectURL(url);
-            document.getElementById('record-btn').disabled = false;
-            this.isPlaying = false;
-            document.getElementById('play-btn').disabled = false;
-            document.getElementById('stop-btn').disabled = true;
-        };
-        
-        this.currentAudio.onerror = () => {
-            this.cleanupObjectURL(url);
-            document.getElementById('record-btn').disabled = false;
-            this.isPlaying = false;
-            this.showNotification('Error al reproducir la grabación', 'error');
-        };
-    }
-
-    stopPlayback() {
-        if (this.currentAudio) {
-            this.currentAudio.pause();
-            this.currentAudio.currentTime = 0;
-            document.getElementById('record-btn').disabled = false;
-            this.isPlaying = false;
-        }
-    }
-
-    loadBackingTrack(event) {
-        const file = event.target.files[0];
-        if (file) {
-            const url = this.createTrackedObjectURL(file);
-            this.backingTrack = new Audio(url);
-            this.backingTrack.onended = () => this.cleanupObjectURL(url);
-        }
-    }
-
-    playBackingTrack() {
-        if (this.backingTrack) {
-            this.backingTrack.play();
-        }
-    }
-
-    stopBackingTrack() {
-        if (this.backingTrack) {
-            this.backingTrack.pause();
-            this.backingTrack.currentTime = 0;
-        }
-    }
-
-    startVisualization() {
-        if (!this.analyser) return;
-        
-        const canvas = document.getElementById('waveform');
-        const ctx = canvas.getContext('2d');
-        const bufferLength = this.analyser.frequencyBinCount;
-        const dataArray = new Uint8Array(bufferLength);
-        
-        const draw = () => {
-            requestAnimationFrame(draw);
-            
-            this.analyser.getByteTimeDomainData(dataArray);
-            
-            ctx.fillStyle = '#0a0a0a';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            
-            ctx.lineWidth = 2;
-            ctx.strokeStyle = '#00ff41';
-            ctx.beginPath();
-            
-            const sliceWidth = canvas.width / bufferLength;
-            let x = 0;
-            
-            for (let i = 0; i < bufferLength; i++) {
-                const v = dataArray[i] / 128.0;
-                const y = v * canvas.height / 2;
-                
-                if (i === 0) {
-                    ctx.moveTo(x, y);
-                } else {
-                    ctx.lineTo(x, y);
-                }
-                
-                x += sliceWidth;
-            }
-            
-            ctx.stroke();
-            
-            // Update level meters
-            this.updateLevelMeters(dataArray);
-        };
-        
-        draw();
-    }
-
-    updateLevelMeters(dataArray) {
-        const leftLevel = document.getElementById('left-level');
-        const rightLevel = document.getElementById('right-level');
-        
-        // Simple level calculation
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-            sum += Math.abs(dataArray[i] - 128);
-        }
-        const average = sum / dataArray.length;
-        const percentage = Math.min(100, (average / 128) * 100);
-        
-        leftLevel.style.width = percentage + '%';
-        rightLevel.style.width = percentage + '%';
-    }
-
-    showRecordingList() {
-        const modalBody = document.getElementById('modal-body');
-        modalBody.innerHTML = `
-            <h3>Grabación Completada</h3>
-            <p>¿Qué quieres hacer con esta grabación?</p>
-            <div class="recording-options">
-                <button class="btn-primary" data-action="recording-open-editor">
-                    <i class="fas fa-cut"></i> Cortar Frases
-                </button>
-                <button class="btn-small" data-action="modal-close">
-                    <i class="fas fa-times"></i> Cerrar
-                </button>
-            </div>
-            <div class="recording-preview">
-                <h4>Grabación actual:</h4>
-                <audio controls data-src="current-recording"></audio>
-            </div>
-        `;
-        
-        document.getElementById('modal').classList.remove('hidden');
-
-        const audioEl = document.querySelector('audio[data-src="current-recording"]');
-        if (audioEl && this.currentRecording) {
-            const url = this.createTrackedObjectURL(this.currentRecording);
-            audioEl.src = url;
-            audioEl.onended = () => this.cleanupObjectURL(url);
-        }
     }
 
     openPhraseEditor() {
@@ -3047,7 +1658,7 @@ class PianoStudyApp {
             this.currentRecordingDuration = decoded.duration;
             this.editorPeaks = this.computeWaveformPeaks(decoded, 2000);
         } catch (e) {
-            console.error('Error decoding audio for editor:', e);
+            logger.error('Error decoding audio for editor:', e);
             this.editorDecodedBuffer = null;
             this.editorDecodedSourceBlob = null;
             this.editorPeaks = null;
@@ -3129,7 +1740,7 @@ class PianoStudyApp {
             const slice = mono.slice(startSample, Math.max(startSample + 1, endSample));
             return this.encodeWavMono(slice, sr);
         } catch (e) {
-            console.error('Error exporting WAV mono:', e);
+            logger.error('Error exporting WAV mono:', e);
             return null;
         }
     }
@@ -3579,7 +2190,7 @@ class PianoStudyApp {
         
         // Mostrar información de la selección
         const selectionDuration = this.currentSelection.duration.toFixed(1);
-        console.log(`Selección: ${selectionDuration} segundos`);
+        logger.log(`Selección: ${selectionDuration} segundos`);
     }
 
     playSelection() {
@@ -3596,7 +2207,7 @@ class PianoStudyApp {
         audio.addEventListener('canplay', () => {
             audio.currentTime = startTime;
             audio.play().catch(err => {
-                console.error('Error reproduciendo selección:', err);
+                logger.error('Error reproduciendo selección:', err);
                 this.showNotification('Error al reproducir. Intenta de nuevo.', 'error');
                 this.cleanupObjectURL(url);
             });
@@ -3733,7 +2344,7 @@ class PianoStudyApp {
 
             phrase.audioBlob = this.encodeWavMono(slice, sr);
         } catch (e) {
-            console.error('ensurePhraseHasExportedAudio error:', e);
+            logger.error('ensurePhraseHasExportedAudio error:', e);
             phrase.audioBlob = null;
         }
 
@@ -3741,7 +2352,7 @@ class PianoStudyApp {
     }
 
     async savePhrasesToLicks() {
-        if (!this.getActiveUsername()) {
+        if (!getActiveUsername()) {
             this.showNotification('Debes iniciar sesión para guardar licks', 'error');
             return;
         }
@@ -3871,7 +2482,7 @@ class PianoStudyApp {
     }
 
     async saveLick() {
-        if (!this.getActiveUsername()) {
+        if (!getActiveUsername()) {
             this.showNotification('Debes iniciar sesión para guardar licks', 'error');
             return;
         }
@@ -3899,7 +2510,7 @@ class PianoStudyApp {
 
         if (error) {
             this.showNotification(ERR_MSG, 'error');
-            console.error('insertLick error:', error);
+            logger.error('insertLick error:', error);
             return;
         }
 
@@ -3914,7 +2525,7 @@ class PianoStudyApp {
 
         this.cleanupContainerObjectURLs(licksList);
 
-        if (!this.getActiveUsername()) {
+        if (!getActiveUsername()) {
             licksList.innerHTML = `<div class="auth-required-banner">
                 <p>Inicia sesión para guardar tu progreso</p>
                 <button class="auth-header-btn auth-header-btn--primary" onclick="document.getElementById('auth-open-login')?.click()">Ingresar</button>
@@ -4293,7 +2904,7 @@ class PianoStudyApp {
     }
 
     renderProgressSection() {
-        if (!this.getActiveUsername()) {
+        if (!getActiveUsername()) {
             const section = document.getElementById('progress');
             if (section) {
                 section.innerHTML = `<h2>Tu Progreso</h2>
@@ -4345,7 +2956,7 @@ class PianoStudyApp {
 
         const { data, error } = await loadPracticeSessionsRange({ fromDate, toDate });
         if (error) {
-            console.error('loadPracticeSessionsRange error:', error);
+            logger.error('loadPracticeSessionsRange error:', error);
             this.practiceChartDays = null;
             return;
         }

@@ -1,4 +1,5 @@
 import { AuthManager } from './AuthManager.js';
+import { getActiveUsername } from '../utils/session.js';
 
 const auth = new AuthManager();
 
@@ -143,6 +144,7 @@ function renderLoggedOut() {
 function renderLoggedIn(session) {
     const section = document.getElementById('auth-user-section');
     if (!section) return;
+    void getActiveUsername;
     const color = avatarColor(session.fullName);
     const ini = initials(session.fullName);
     const hasQ = auth.hasSecurityQuestion(session.username);

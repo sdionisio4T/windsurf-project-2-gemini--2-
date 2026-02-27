@@ -25,13 +25,20 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { apiKey, prompt, systemPrompt } = await req.json();
+    const { prompt, systemPrompt } = await req.json();
+    const apiKey = Deno.env.get('GEMINI_API_KEY');
 
     if (!apiKey || typeof apiKey !== 'string') {
-      return new Response(JSON.stringify({ error: 'Missing apiKey' }), {
-        status: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({
+          status: 500,
+          body: { error: 'Missing GEMINI_API_KEY' },
+        }),
+        {
+          status: 200,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        },
+      );
     }
 
     if (!prompt || typeof prompt !== 'string') {

@@ -1,31 +1,14 @@
+import { db } from './supabase-client.js';
+import { logger } from '../utils/logger.js';
+
 export class AIAnalysisEngine {
-    constructor(apiKey) {
-        this.apiKey = apiKey;
-    }
-
     async callGemini(prompt, systemPrompt = null) {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${this.apiKey}`;
-
-        const payload = {
-            contents: [{ role: 'user', parts: [{ text: prompt }] }]
-        };
-        if (systemPrompt) {
-            payload.systemInstruction = { parts: [{ text: systemPrompt }] };
-        }
-
-        const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+        const { data, error } = await db.functions.invoke('gemini-proxy', {
+            body: { prompt, systemPrompt }
         });
-
-        const data = await res.json();
-        if (!res.ok) {
-            console.log('[callGemini] error body:', data);
-            throw new Error(`API error: ${res.status}`);
-        }
-        console.log('[callGemini] respuesta completa:', JSON.stringify(data, null, 2));
-        return data;
+        if (error) throw new Error('Error llamando al proxy: ' + error.message);
+        if (data?.status !== 200) throw new Error('Error del proxy: ' + JSON.stringify(data?.body));
+        return data.body;
     }
 
     async analyzePerformance(audioAnalysis, recordingMetadata = {}) {
@@ -36,7 +19,7 @@ export class AIAnalysisEngine {
             const analysis = this.parseAIResponse(text);
             return analysis || this.getFallbackAnalysis(audioAnalysis);
         } catch (error) {
-            console.error('Error calling Gemini API:', error);
+            logger.error('Error calling Gemini API:', error);
             return this.getFallbackAnalysis(audioAnalysis);
         }
     }
@@ -44,7 +27,6 @@ export class AIAnalysisEngine {
     async answerQuestion(audioAnalysis, aiAnalysis, question) {
         const q = String(question || '').trim();
         if (!q) return 'Escribe una pregunta para poder ayudarte.';
-        if (!this.apiKey) return this.getFallbackAnswer(audioAnalysis, aiAnalysis, q);
 
         const prompt = this.buildQuestionPrompt(audioAnalysis, aiAnalysis, q);
         try {
@@ -52,7 +34,7 @@ export class AIAnalysisEngine {
             const text = String(data?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
             return text || this.getFallbackAnswer(audioAnalysis, aiAnalysis, q);
         } catch (error) {
-            console.error('Error calling Gemini API (Q&A):', error);
+            logger.error('Error calling Gemini API (Q&A):', error);
             return this.getFallbackAnswer(audioAnalysis, aiAnalysis, q);
         }
     }
@@ -189,7 +171,7 @@ INSTRUCCIONES DE RESPUESTA:
             }
             return JSON.parse(text);
         } catch (error) {
-            console.error('Error parsing AI response:', error);
+            logger.error('Error parsing AI response:', error);
             return null;
         }
     }

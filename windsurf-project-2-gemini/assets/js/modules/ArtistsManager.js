@@ -1,5 +1,6 @@
 import { artists, styleColors, styleLabels } from '../data/artists.js';
 import { escapeHtml } from '../utils/sanitizers.js';
+import { logger } from '../utils/logger.js';
 
 function getDailyArtist() {
     const seed = new Date().toDateString();
@@ -97,7 +98,7 @@ export class ArtistsManager {
                 }));
             }
         } catch (e) {
-            console.error('ArtistsManager.loadCustomArtists:', e);
+            logger.error('ArtistsManager.loadCustomArtists:', e);
         }
     }
 
@@ -276,7 +277,7 @@ export class ArtistsManager {
             this.render();
             this.app.showNotification(`"${escapeHtml(name)}" agregado a tu colección`, 'success');
         } catch (e) {
-            console.error('saveCustomArtist:', e);
+            logger.error('saveCustomArtist:', e);
             this.app.showNotification('Error al guardar artista', 'error');
         }
     }
@@ -291,7 +292,7 @@ export class ArtistsManager {
             this.render();
             this.app.showNotification('Artista eliminado', 'info');
         } catch (e) {
-            console.error('deleteCustomArtist:', e);
+            logger.error('deleteCustomArtist:', e);
             this.app.showNotification('Error al eliminar artista', 'error');
         }
     }

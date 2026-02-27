@@ -1,3 +1,5 @@
+import { logger } from '../utils/logger.js';
+
 export class AudioAnalyzer {
     constructor() {
         this.audioContext = null;
@@ -47,7 +49,7 @@ export class AudioAnalyzer {
                     analysisProvider: 'essentia'
                 };
             } catch (essErr) {
-                console.warn('Essentia no disponible, usando fallback local:', essErr);
+                logger.warn('Essentia no disponible, usando fallback local:', essErr);
                 analysis = this.buildFallbackAnalysis(audioBuffer);
             }
 
@@ -55,7 +57,7 @@ export class AudioAnalyzer {
                 try {
                     analysis.midiNotes = await this.transcribeToMidi(audioBlob);
                 } catch (midiErr) {
-                    console.warn('Basic Pitch no disponible:', midiErr);
+                    logger.warn('Basic Pitch no disponible:', midiErr);
                     analysis.midiNotes = [];
                 }
             }
@@ -64,7 +66,7 @@ export class AudioAnalyzer {
 
             return analysis;
         } catch (error) {
-            console.error('Error analyzing audio:', error);
+            logger.error('Error analyzing audio:', error);
             throw error;
         }
     }

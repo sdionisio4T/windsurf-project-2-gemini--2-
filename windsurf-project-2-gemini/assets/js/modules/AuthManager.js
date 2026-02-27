@@ -1,4 +1,6 @@
 import { db } from './supabase-client.js';
+import { getSupabaseRawSession, getActiveUserMetadata } from '../utils/session.js';
+import { logger } from '../utils/logger.js';
 
 export class AuthManager {
     // ── Crypto helpers ────────────────────────────────────────────────────────
@@ -109,12 +111,12 @@ export class AuthManager {
                     security_question: question
                 }, { onConflict: 'id' });
             } catch (profileErr) {
-                console.warn('register: could not upsert user_profiles:', profileErr);
+                logger.warn('register: could not upsert user_profiles:', profileErr);
             }
 
             return { ok: true, user: this._publicUser(data.user) };
         } catch (e) {
-            console.error('register error:', e);
+            logger.error('register error:', e);
             return { ok: false, error: 'Error al conectar. Verifica tu conexión e intenta de nuevo.' };
         }
     }
@@ -147,7 +149,7 @@ export class AuthManager {
 
             return { ok: true, user: this._publicUser(data.user) };
         } catch (e) {
-            console.error('login error:', e);
+            logger.error('login error:', e);
             return { ok: false, error: 'Error al conectar. Verifica tu conexión e intenta de nuevo.' };
         }
     }
@@ -157,21 +159,9 @@ export class AuthManager {
     getActiveSession() {
         // Synchronous snapshot — Supabase stores session in localStorage internally.
         // Returns a session-like object compatible with auth-ui.js expectations.
-        try {
-            // Access the raw Supabase session from its internal storage key
-            const keys = Object.keys(localStorage);
-            const sbKey = keys.find(k => k.startsWith('sb-') && k.endsWith('-auth-token'));
-            if (!sbKey) return null;
-            const raw = localStorage.getItem(sbKey);
-            if (!raw) return null;
-            const parsed = JSON.parse(raw);
-            const supaSession = parsed?.session ?? parsed;
-            if (!supaSession?.user) return null;
-            if (supaSession.expires_at && Date.now() / 1000 > supaSession.expires_at) return null;
-            return this._sessionFromSupaUser(supaSession.user);
-        } catch {
-            return null;
-        }
+        const session = getSupabaseRawSession();
+        if (!session?.user) return null;
+        return this._sessionFromSupaUser(session.user);
     }
 
     async getActiveSessionAsync() {
@@ -194,7 +184,7 @@ export class AuthManager {
         try {
             await db.auth.signOut();
         } catch (e) {
-            console.error('logout error:', e);
+            logger.error('logout error:', e);
         }
     }
 
@@ -211,7 +201,7 @@ export class AuthManager {
         // For recovery (not logged in), we need the async version.
         const session = this.getActiveSession();
         if (!session) return null;
-        const meta = this._getRawMetadata();
+        const meta = getActiveUserMetadata();
         return meta?.securityQuestion || null;
     }
 
@@ -233,7 +223,7 @@ export class AuthManager {
     async verifySecurityAnswer(usernameOrEmail, answer) {
         const ans = String(answer || '').trim().toLowerCase();
         // For logged-in user (SQ setup flow)
-        const meta = this._getRawMetadata();
+        const meta = getActiveUserMetadata();
         if (!meta?.answerHash || !meta?.answerSalt) {
             await this.hashPassword(ans, 'dummy-salt-00000000000000000000000000000000');
             return false;
@@ -256,13 +246,13 @@ export class AuthManager {
             if (error) return { ok: false, error: this._mapAuthError(error) };
             return { ok: true };
         } catch (e) {
-            console.error('resetPassword error:', e);
+            logger.error('resetPassword error:', e);
             return { ok: false, error: 'Error al guardar. Intenta de nuevo.' };
         }
     }
 
     hasSecurityQuestion(username) {
-        const meta = this._getRawMetadata();
+        const meta = getActiveUserMetadata();
         return !!(meta?.securityQuestion && meta?.answerHash);
     }
 
@@ -297,27 +287,12 @@ export class AuthManager {
             if (error) return { ok: false, error: this._mapAuthError(error) };
             return { ok: true };
         } catch (e) {
-            console.error('setSecurityQuestion error:', e);
+            logger.error('setSecurityQuestion error:', e);
             return { ok: false, error: 'Error al guardar. Intenta de nuevo.' };
         }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    _getRawMetadata() {
-        try {
-            const keys = Object.keys(localStorage);
-            const sbKey = keys.find(k => k.startsWith('sb-') && k.endsWith('-auth-token'));
-            if (!sbKey) return null;
-            const raw = localStorage.getItem(sbKey);
-            if (!raw) return null;
-            const parsed = JSON.parse(raw);
-            const supaSession = parsed?.session ?? parsed;
-            return supaSession?.user?.user_metadata || null;
-        } catch {
-            return null;
-        }
-    }
 
     _sessionFromSupaUser(user) {
         const meta = user.user_metadata || {};
